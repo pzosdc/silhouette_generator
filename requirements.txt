@@ -1,0 +1,7 @@
+CairoSVG==2.5.2
+docopt==0.6.2
+matplotlib==3.4.2
+numpy==1.20.1
+svgwrite==1.4.1
+sympy==1.8
+tqdm==4.59.0
