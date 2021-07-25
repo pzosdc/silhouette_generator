@@ -3,11 +3,14 @@
 
 Usage:
     program <input_json> <output_dir> [-n <n>]
+        [--no_image] [--skip_overwrap_check]
 
 Options:
     <input_json>   json file of silhouette puzzle
     <output_dir>   output directory. create if not exist.
     -n <n>   number of silhouette you want to generate
+    --no_image   do not create image
+    --skip_overwrap_check   skip overwrap check
 
 """
 
@@ -113,14 +116,14 @@ def draw_polys(polys, svgfile, *, bbox=None, shadow=False,
                also_save_as_png=False):
     if shadow:
         # draw as black face
-        options = dict(
+        drawoptions = dict(
             stroke="black",
             stroke_width=1,
             fill=svgwrite.rgb(0, 0, 0, "RGB"),
             )
     else:
         # draw as brown (half-transparent) face
-        options = dict(
+        drawoptions = dict(
             stroke='brown',
             stroke_width=1,
             fill='saddlebrown',
@@ -140,7 +143,7 @@ def draw_polys(polys, svgfile, *, bbox=None, shadow=False,
     for poly in polys:
         vertices_in_svg_coord = [[_mapx(v[0]), _mapy(v[1])]
                                  for v in poly.vertices]
-        dwg.add(svgwrite.shapes.Polygon(vertices_in_svg_coord, **options))
+        dwg.add(svgwrite.shapes.Polygon(vertices_in_svg_coord, **drawoptions))
     dwg.save()
 
     if also_save_as_png:
@@ -294,7 +297,11 @@ def draw_contour(ax, grids, bbox, pngfile):
     matplotlib.pyplot.savefig(pngfile)
 
 
-def generate_silhouette_core(jsonfile, outdir, *, num_generation=10):
+def generate_silhouette_core(jsonfile, outdir, *,
+                             num_generation=10,
+                             create_image=True,
+                             skip_overwrap_check=False,
+                             ):
     jsondata = load_polys(jsonfile)
     outdir.resolve().mkdir(exist_ok=True, parents=True)
     ax = matplotlib.pyplot.figure(figsize=(8, 8)).add_subplot()
@@ -312,10 +319,15 @@ def generate_silhouette_core(jsonfile, outdir, *, num_generation=10):
         polygondict = puzzleinfo['polygon']
         polys = [Polygon(polykey, vertices)
                  for polykey, vertices in polygondict.items()]
-        wrapdir = puzzleoutdir / 'wrap'
-        planardir = puzzleoutdir / 'planar'
-        wrapdir.mkdir(exist_ok=True)
-        planardir.mkdir(exist_ok=True)
+        if create_image:
+            if skip_overwrap_check:
+                imagedir = puzzleoutdir / 'image'
+                imagedir.mkdir(exist_ok=True)
+            else:
+                wrapdir = puzzleoutdir / 'wrap'
+                planardir = puzzleoutdir / 'planar'
+                wrapdir.mkdir(exist_ok=True)
+                planardir.mkdir(exist_ok=True)
 
         # save start-position image before generation
         svgfile = puzzleoutdir / f'{puzzlename}.svg'
@@ -334,28 +346,37 @@ def generate_silhouette_core(jsonfile, outdir, *, num_generation=10):
                 new_polys = make_random_silhouette(polys)
                 new_polys = rotate_random_all(new_polys)
                 bbox = bbox_adjust_all(new_polys, xsize, ysize)
-                has_overwrap, grids = has_overwrap_roughcheck(new_polys, bbox)
-                imagedirname = 'wrap' if has_overwrap else 'planar'
-                imagedir = puzzleoutdir / imagedirname
+                if skip_overwrap_check:
+                    has_overwrap = 'Unknown'
+                else:
+                    has_overwrap, grids = \
+                        has_overwrap_roughcheck(new_polys, bbox)
                 newpuzzleinfo = dict(
                     has_overwrap=has_overwrap,
                     polygon={poly.name: poly.vertices for poly in polys}
                     )
                 resultjson[puzzlesubname] = newpuzzleinfo
-                if has_overwrap:
-                    pngfile = imagedir / f'{puzzlesubname}_contour.png'
-                    draw_contour(ax, grids, bbox, pngfile)
+                if create_image:
+                    if skip_overwrap_check:
+                        imagedirname = 'image'
+                    else:
+                        imagedirname = 'wrap' if has_overwrap else 'planar'
+                    imagedir = puzzleoutdir / imagedirname
+                    if (not skip_overwrap_check) and has_overwrap:
+                        pngfile = imagedir / f'{puzzlesubname}_contour.png'
+                        draw_contour(ax, grids, bbox, pngfile)
 
-                svgfile = imagedir / f'{puzzlesubname}.svg'
-                draw_polys(new_polys, svgfile, shadow=True, bbox=bbox,
-                           also_save_as_png=True)
+                    svgfile = imagedir / f'{puzzlesubname}.svg'
+                    draw_polys(new_polys, svgfile, shadow=True, bbox=bbox,
+                               also_save_as_png=True)
 
-                svgfile_answer = imagedir / f'{puzzlesubname}_ans.svg'
-                draw_polys(new_polys, svgfile_answer, shadow=False, bbox=bbox,
-                           also_save_as_png=True)
+                    svgfile_answer = imagedir / f'{puzzlesubname}_ans.svg'
+                    draw_polys(new_polys, svgfile_answer,
+                               shadow=False, bbox=bbox,
+                               also_save_as_png=True)
         except Exception as err:
             print(err)
-        except KeyboardInterrupt as err:
+        except KeyboardInterrupt:
             print(f'KeyboardInterrupt at step {i}: generation is stopped')
             save_polys(resultjson, puzzleoutdir / f'{puzzlename}.json')
             sys.exit()
@@ -368,10 +389,16 @@ def main():
     jsonfile = pathlib.Path(args.get('<input_json>') or 'input.json')
     outdir = pathlib.Path(args.get('<output_dir>') or 'result')
     num_generation = int(args.get('-n') or 10)
+    genoptions = dict(
+        create_image=(not (args.get('--no_image') or False)),
+        skip_overwrap_check=(args.get('--skip_overwrap_check') or False),
+        )
 
     # run generation of puzzles
     generate_silhouette_core(jsonfile, outdir,
-                             num_generation=num_generation)
+                             num_generation=num_generation,
+                             **genoptions
+                             )
 
 
 if __name__ == '__main__':
