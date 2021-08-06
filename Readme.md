@@ -31,7 +31,7 @@ LICENSE  Readme.md  generate_silhouette.py  requirements.txt  samples
 $ ls samples
 Tangram.json  Tpuzzle.json  multi.json
 
-$ python generate_silhouette.py
+$ python generate_silhouette.py --help
 Usage:
     program <input_json> <output_dir> [-n <n>]
         [--no_image] [--skip_overwrap_check]
@@ -43,7 +43,7 @@ Options:
     -n <n>   number of silhouette you want to generate
     --no_image   do not create image
     --skip_overwrap_check   skip overwrap check
-    --discard_overwrap   discard silhoette having overwraps
+    --discard_overwrap   discard silhouette having overwraps
 
 $ python generate_silhouette.py ./samples/Tangram.json ../result/ -n 1000 --discard_overwrap
 

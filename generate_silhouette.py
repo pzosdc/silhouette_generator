@@ -12,7 +12,7 @@ Options:
     -n <n>   number of silhouette you want to generate
     --no_image   do not create image
     --skip_overwrap_check   skip overwrap check
-    --discard_overwrap   discard silhoette having overwraps
+    --discard_overwrap   discard silhouette having overwraps
 
 """
 
