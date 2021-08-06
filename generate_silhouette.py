@@ -4,6 +4,7 @@
 Usage:
     program <input_json> <output_dir> [-n <n>]
         [--no_image] [--skip_overwrap_check]
+        [--discard_overwrap]
 
 Options:
     <input_json>   json file of silhouette puzzle
@@ -11,20 +12,23 @@ Options:
     -n <n>   number of silhouette you want to generate
     --no_image   do not create image
     --skip_overwrap_check   skip overwrap check
+    --discard_overwrap   discard silhoette having overwraps
 
 """
 
 import cairosvg
+import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
 import docopt
 import json
 import matplotlib.pyplot
 import math
 import numpy as np
 import pathlib
+import pandas as pd
 import random
 import svgwrite
-import sys
-import tqdm
+import time
 
 
 class SilhouetteError(Exception):
@@ -138,7 +142,7 @@ def draw_polys(polys, svgfile, *, bbox=None, shadow=False,
         return (x - xmin) / (xmax - xmin) * 400
 
     def _mapy(y):
-        return (y - ymin) / (ymax - ymin) * 400
+        return (ymax - y) / (ymax - ymin) * 400
 
     for poly in polys:
         vertices_in_svg_coord = [[_mapx(v[0]), _mapy(v[1])]
@@ -263,6 +267,11 @@ def get_wrap_poly_count_matrix(x_list, y_list, polys):
 
 
 def has_overwrap_roughcheck(polys, bbox):
+    """function to detect overwraps of pieces.
+
+    also make depth-map grid (slower)
+    you may better use the second version of overwrap check function.
+    """
     xmin, xmax, ymin, ymax = bbox
 
     xmin = float(xmin) + (1 / 1001) * random.random()
@@ -286,6 +295,62 @@ def has_overwrap_roughcheck(polys, bbox):
     return False, grids
 
 
+def overwrap_at_y(polys, y):
+    collisions_x = []
+    collisions_label = []
+    for poly in polys:
+        for side in poly.sides:
+            x1, y1, x2, y2 = side
+            if y1 == y2:
+                continue
+            if (y1 < y) is (y2 > y):
+                xc = x1 - (x2 - x1) * ((y1 - y) / (y2 - y1))
+                collisions_x.append(xc)
+                collisions_label.append(poly.name)
+    if len(collisions_x) <= 2:
+        return False
+    df = pd.DataFrame(dict(x=collisions_x, label=collisions_label))
+    df = df.sort_values(by='x')
+    collisions_x = df['x'].values.tolist()
+    collisions_label = df['label'].values.tolist()
+    namelist = np.unique(df['label'].values)
+    # 内側に微小量だけシフトさせる
+    positive_eps = 1e-8
+    for name in namelist:
+        is_odd = True
+        for i in range(len(df)):
+            if collisions_label[i] == name:
+                if is_odd:
+                    collisions_x[i] += positive_eps
+                else:
+                    collisions_x[i] -= positive_eps
+                is_odd = not is_odd
+    # もう一度ソートする
+    df = pd.DataFrame(dict(x=collisions_x, label=collisions_label))
+    df = df.sort_values(by='x')
+
+    arr = df['label'].values.reshape(len(df)//2, 2)
+    return not all(arr[:, 0] == arr[:, 1])
+
+
+def has_overwrap_roughcheck2(polys, bbox):
+    """function to detect overwraps of pieces."""
+    xmin, xmax, ymin, ymax = bbox
+
+    xmin = float(xmin) + (1 / 1001) * random.random()
+    xmax = float(xmax) + (1 / 1003) * random.random()
+    ymin = float(ymin) + (1 / 1005) * random.random()
+    ymax = float(ymax) + (1 / 1007) * random.random()
+    ydiv = 400
+    ytests = np.linspace(float(ymin), float(ymax), ydiv)
+    np.random.shuffle(ytests)
+
+    for y in ytests:
+        if overwrap_at_y(polys, y):
+            return True
+    return False
+
+
 def draw_contour(ax, grids, bbox, pngfile):
     xgrid, ygrid, zgrid = grids
     ax.contourf(xgrid, ygrid, zgrid)
@@ -297,90 +362,129 @@ def draw_contour(ax, grids, bbox, pngfile):
     matplotlib.pyplot.savefig(pngfile)
 
 
+def generate_silhouette_single(
+        puzzlesubname, polys,
+        xsize, ysize, puzzleoutdir, ax,
+        skip_overwrap_check,
+        discard_overwrap,
+        create_image,
+        ):
+    new_polys = make_random_silhouette(polys)
+    new_polys = rotate_random_all(new_polys)
+    bbox = bbox_adjust_all(new_polys, xsize, ysize)
+    if skip_overwrap_check:
+        has_overwrap = 'Unknown'
+    else:
+        if discard_overwrap:
+            has_overwrap = has_overwrap_roughcheck2(new_polys, bbox)
+        else:
+            has_overwrap, grids = \
+                has_overwrap_roughcheck(new_polys, bbox)
+    if (has_overwrap is True) and discard_overwrap:
+        return None, puzzlesubname
+    newpuzzleinfo = dict(
+        has_overwrap=has_overwrap,
+        polygon={poly.name: poly.vertices for poly in polys}
+        )
+    if not create_image:
+        return newpuzzleinfo, puzzlesubname
+    if skip_overwrap_check:
+        imagedirname = 'image'
+    else:
+        imagedirname = 'wrap' if has_overwrap else 'planar'
+    imagedir = puzzleoutdir / imagedirname
+    if (not skip_overwrap_check) and has_overwrap:
+        pngfile = imagedir / f'{puzzlesubname}_contour.png'
+        draw_contour(ax, grids, bbox, pngfile)
+
+    svgfile = imagedir / f'{puzzlesubname}.svg'
+    draw_polys(new_polys, svgfile, shadow=True, bbox=bbox,
+               also_save_as_png=True)
+
+    svgfile_answer = imagedir / f'{puzzlesubname}_ans.svg'
+    draw_polys(new_polys, svgfile_answer,
+               shadow=False, bbox=bbox,
+               also_save_as_png=True)
+    return newpuzzleinfo, puzzlesubname
+
+
+def ith_run(puzzlesubname, polygondict, *args):
+    polys = [Polygon(polykey, vertices)
+             for polykey, vertices in polygondict.items()]
+    ret = generate_silhouette_single(puzzlesubname, polys, *args)
+    if ret[0] is not None:
+        print(ret[1])
+    return ret
+
+
 def generate_silhouette_core(jsonfile, outdir, *,
                              num_generation=10,
                              create_image=True,
                              skip_overwrap_check=False,
+                             discard_overwrap=False,
                              ):
     jsondata = load_polys(jsonfile)
     outdir.resolve().mkdir(exist_ok=True, parents=True)
     ax = matplotlib.pyplot.figure(figsize=(8, 8)).add_subplot()
 
     # [FIXME] this value should be changed when the size of puzzle is changed
-    xsize = 10
-    ysize = 10
+    xsize = 12
+    ysize = 12
 
     for puzzlename in jsondata.keys():
         print(f'{puzzlename = }')
-        resultjson = dict()
+        time_start_proc = time.time()
         puzzleoutdir = outdir / puzzlename
+        imagedir = puzzleoutdir / 'image'
+        wrapdir = puzzleoutdir / 'wrap'
+        planardir = puzzleoutdir / 'planar'
         puzzleoutdir.mkdir(exist_ok=True)
+        if create_image:
+            if skip_overwrap_check:
+                imagedir.mkdir(exist_ok=True)
+            else:
+                planardir.mkdir(exist_ok=True)
+                if not discard_overwrap:
+                    wrapdir.mkdir(exist_ok=True)
         puzzleinfo = jsondata[puzzlename]
         polygondict = puzzleinfo['polygon']
         polys = [Polygon(polykey, vertices)
                  for polykey, vertices in polygondict.items()]
-        if create_image:
-            if skip_overwrap_check:
-                imagedir = puzzleoutdir / 'image'
-                imagedir.mkdir(exist_ok=True)
-            else:
-                wrapdir = puzzleoutdir / 'wrap'
-                planardir = puzzleoutdir / 'planar'
-                wrapdir.mkdir(exist_ok=True)
-                planardir.mkdir(exist_ok=True)
 
         # save start-position image before generation
+        save_polys({puzzlename: puzzleinfo},
+                   puzzleoutdir / f'{puzzlename}_in.json')
         svgfile = puzzleoutdir / f'{puzzlename}.svg'
         bbox = bbox_adjust_all(polys, xsize, ysize)
         draw_polys(polys, svgfile, shadow=False, bbox=bbox,
                    also_save_as_png=True)
 
-        pbar = tqdm.tqdm(
-            range(1, num_generation + 1),
-            desc=f'Generating {puzzlename} state',
-            unit='state',
-            )
-        try:
-            for i in pbar:
-                puzzlesubname = f'{puzzlename}-{i}'
-                new_polys = make_random_silhouette(polys)
-                new_polys = rotate_random_all(new_polys)
-                bbox = bbox_adjust_all(new_polys, xsize, ysize)
-                if skip_overwrap_check:
-                    has_overwrap = 'Unknown'
-                else:
-                    has_overwrap, grids = \
-                        has_overwrap_roughcheck(new_polys, bbox)
-                newpuzzleinfo = dict(
-                    has_overwrap=has_overwrap,
-                    polygon={poly.name: poly.vertices for poly in polys}
-                    )
+        resultjson = dict()
+        i_list = list(range(1, num_generation + 1))
+        with ProcessPoolExecutor() as executor:
+            fs = [executor.submit(
+                ith_run,
+                f'{puzzlename}-{i}', polygondict,
+                xsize, ysize, puzzleoutdir, ax,
+                skip_overwrap_check,
+                discard_overwrap,
+                create_image,
+                ) for i in i_list]
+            concurrent.futures.wait(fs)
+            results = [f.result() for f in fs]
+        for result in results:
+            newpuzzleinfo, puzzlesubname = result
+            if newpuzzleinfo is not None:
+                print('Puzzle!', puzzlesubname)
                 resultjson[puzzlesubname] = newpuzzleinfo
-                if create_image:
-                    if skip_overwrap_check:
-                        imagedirname = 'image'
-                    else:
-                        imagedirname = 'wrap' if has_overwrap else 'planar'
-                    imagedir = puzzleoutdir / imagedirname
-                    if (not skip_overwrap_check) and has_overwrap:
-                        pngfile = imagedir / f'{puzzlesubname}_contour.png'
-                        draw_contour(ax, grids, bbox, pngfile)
-
-                    svgfile = imagedir / f'{puzzlesubname}.svg'
-                    draw_polys(new_polys, svgfile, shadow=True, bbox=bbox,
-                               also_save_as_png=True)
-
-                    svgfile_answer = imagedir / f'{puzzlesubname}_ans.svg'
-                    draw_polys(new_polys, svgfile_answer,
-                               shadow=False, bbox=bbox,
-                               also_save_as_png=True)
-        except Exception as err:
-            print(err)
-        except KeyboardInterrupt:
-            print(f'KeyboardInterrupt at step {i}: generation is stopped')
-            save_polys(resultjson, puzzleoutdir / f'{puzzlename}.json')
-            sys.exit()
-        save_polys(resultjson, puzzleoutdir / f'{puzzlename}.json')
+        num_puzzle = len(resultjson.keys())
+        time_end_proc = time.time()
+        time_proc = time_end_proc - time_start_proc
+        print()
+        print(f'number of puzzles found: {num_puzzle}')
+        print(f'time: {time_proc} sec')
+        print()
+        save_polys(resultjson, puzzleoutdir / f'{puzzlename}_out.json')
 
 
 def main():
@@ -392,6 +496,7 @@ def main():
     genoptions = dict(
         create_image=(not (args.get('--no_image') or False)),
         skip_overwrap_check=(args.get('--skip_overwrap_check') or False),
+        discard_overwrap=(args.get('--discard_overwrap') or False),
         )
 
     # run generation of puzzles
