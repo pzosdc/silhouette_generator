@@ -11,6 +11,10 @@ from given polyomino pieces.
 $ python --version
 3.9.2
 
+$ git clone https://github.com/pzosdc/silhouette_generator
+
+$ cd silhouette_generator
+
 $ pip install -r requirements.txt
 ```
 
