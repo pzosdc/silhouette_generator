@@ -2,7 +2,7 @@ Silhouette Generator: Generate Dissection Puzzle Problems
 =========================================================
 
 This program generates dissection-puzzle shapes
-from given polyomino pieces.
+from given polygonal pieces.
 
 
 ## Install
