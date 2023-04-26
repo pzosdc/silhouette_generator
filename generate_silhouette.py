@@ -26,6 +26,8 @@ import random
 import svgwrite
 import time
 
+from evaluate_silhouette import SilhouetteSurfaceNodeEvaluator
+
 
 class SilhouetteError(Exception):
     ...
@@ -85,12 +87,18 @@ class Polygon:
         self.xys = np.array(xys)
 
     def flip(self, inplace=False):
-        """inverse y-coordinate."""
+        """inverse y-coordinate.
+
+        ピースの時計回り・反時計回り、が変化すると厄介なので、
+        鏡映した後で巡回の順序も逆転する
+        """
         if inplace:
             self.xys = self.xys * np.array([1., -1.])
+            self.xys = self.xys[-1::-1, :]
             return self
         else:
             flip_xys = self.xys * np.array([1., -1.])
+            flip_xys = flip_xys[-1::-1, :]
             return self.__class__(name=self.name, xys=flip_xys)
 
     def translate(self, dx, dy, inplace=False):
@@ -451,6 +459,11 @@ class PuzzleGenerator:
                 seed_puzzle, new_puzzle_name,
                 n_retry=10,
                 )
+        elif self.alg == "alg_A2_20230426":
+            new_puzzle = self.alg_A2_20230426(
+                seed_puzzle, new_puzzle_name,
+                n_retry=20,
+                )
         else:
             raise ValueError("Unknown algorithm")
 
@@ -585,6 +598,103 @@ class PuzzleGenerator:
               record_num_retry / len(seed_puzzle.polygons))
         return Puzzle(name=new_puzzle_name, polygons=new_polys)
 
+    @profiler.method_timer
+    def alg_A2_20230426(self, seed_puzzle, new_puzzle_name, n_retry=10):
+        """ランダム成長をベースにして、少し枝刈り."""
+        polys = seed_puzzle.polygons.copy()
+
+        # 外周情報の評価用
+        evaluator = SilhouetteSurfaceNodeEvaluator()
+
+        random.shuffle(polys)
+        new_polys = [polys[0]]
+        for poly in polys[1:]:
+
+            best_cand = None
+            best_score = None
+
+            for i_retry in range(n_retry):
+                # step 1. capriciously flip
+                flip = (random.randint(0, 1) == 1)
+                if flip:
+                    flipped_poly = poly.flip()
+                else:
+                    flipped_poly = poly
+                # step 2. decide which pair of sides
+                #         to be sticked in a random manner
+                target_sides = random.choice(new_polys).sides
+                target_side = random.choice(target_sides)
+                source_sides = flipped_poly.sides
+                source_side = random.choice(source_sides)
+                place_begin_to_end = (random.randint(0, 1) == 1)
+                if place_begin_to_end:
+                    source_vertex = [source_side[0], source_side[1]]
+                    target_vertex = [target_side[2], target_side[3]]
+                else:
+                    source_vertex = [source_side[2], source_side[3]]
+                    target_vertex = [target_side[0], target_side[1]]
+                # step 3. stick the pair of sides (which is decided in step 2.)
+                dx = target_vertex[0] - source_vertex[0]
+                dy = target_vertex[1] - source_vertex[1]
+                moved_poly = flipped_poly.translate(dx, dy)
+
+                source_angle = math.atan2(source_side[3] - source_side[1],
+                                          source_side[2] - source_side[0])
+                target_angle = math.atan2(target_side[3] - target_side[1],
+                                          target_side[2] - target_side[0])
+                dth = math.pi + target_angle - source_angle
+                rotated_poly = moved_poly.rotate(*target_vertex, dth)
+
+                # step 4. evaluate
+                tmp_puzzle = Puzzle(
+                    name="_tmp_",
+                    polygons=[*new_polys, rotated_poly]
+                    )
+                bbox = rotated_poly.get_boundingbox()
+                ow = tmp_puzzle.has_overwrap_roughcheck2(bbox, ydiv=5)
+                if ow:
+                    continue
+
+                # [NOTE] この段階では重なりチェックを厳密に実行していないことに
+                #        注意
+                # evaluatorは重なっていないことを前提に設計されているため、
+                # 重なっていると評価時に例外が発生することがある
+
+                # step 5. evaluate (difficulty-based)
+                try:
+                    evaluator.eval(tmp_puzzle)
+                except Exception as err:
+                    # とりあえず例外catchで対策
+                    continue
+
+                score = 0.0
+                score -= 1.0 * evaluator.num_borders  # ボーダーが多いほど損
+                # score += 1.5 * (
+                #     evaluator.num_nodes - evaluator.num_valid_nodes
+                #     )  # 内部ノードが多いほど得
+                for deg_path in evaluator.degree_list:
+                    for deg in deg_path:
+                        if abs(deg - 180.0) < 1.0:
+                            score += 0.5
+                        else:
+                            score -= 1.0
+
+                # print(f"{score=}")
+
+                if best_score is None:
+                    best_score = score
+                    best_cand = rotated_poly
+                elif score > best_score:
+                    best_score = score
+                    best_cand = rotated_poly
+
+            if best_score is None:
+                new_polys.append(rotated_poly)
+            else:
+                new_polys.append(best_cand)
+
+        return Puzzle(name=new_puzzle_name, polygons=new_polys)
+
 
 def generate_silhouettes(
         jsonfile, outdir, *,
@@ -603,7 +713,8 @@ def generate_silhouettes(
 
     puzzle_generator = PuzzleGenerator(
         # algorithm="random_growth",
-        algorithm="alg_A1_20230426",
+        # algorithm="alg_A1_20230426",
+        algorithm="alg_A2_20230426",
         )
 
     for puzzle in multiple_puzzle:
@@ -635,6 +746,7 @@ def generate_silhouettes(
                 continue
             print('Puzzle!', new_puzzle.name)
             multiple_puzzle_from_current_seed.append(new_puzzle)
+
         num_puzzle = len(multiple_puzzle_from_current_seed)
         print()
         print(f'number of puzzles found: {num_puzzle}')
@@ -661,7 +773,7 @@ def main():
         **genoptions
         )
 
-    profiler.report()
+    # profiler.report()
 
 
 if __name__ == '__main__':
