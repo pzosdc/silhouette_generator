@@ -20,13 +20,9 @@ $ pip install -r requirements.txt
 
 ## Usage
 
-Silhouette Generator consists of practically one Python file.
-One can simply run that file to generate puzzles.
-For dependencies, please look in the ``requirements.txt``.
-
 ```
 $ ls
-LICENSE  Readme.md  generate_silhouette.py  requirements.txt  samples
+LICENSE  Readme.md  evalute_silhouette.py generate_silhouette.py  requirements.txt  samples
 
 $ ls samples
 Tangram.json  Tpuzzle.json  multi.json
