@@ -352,6 +352,7 @@ class SilhouetteSurfaceNodeEvaluator(SilhouetteEvaluator):
         'num_borders',
         'num_nodes',
         'num_valid_nodes',
+        'num_inner_nodes',
         'degree_list',
         'degree_word',
         'degree_bag',
@@ -370,6 +371,7 @@ class SilhouetteSurfaceNodeEvaluator(SilhouetteEvaluator):
         self.num_borders = 0
         self.num_nodes = 0
         self.num_valid_nodes = 0
+        self.num_inner_nodes = 0
         self.degree_list = []
         self.degree_bag = None
         if self.degree_word is not None:
@@ -385,6 +387,7 @@ class SilhouetteSurfaceNodeEvaluator(SilhouetteEvaluator):
 
         total_num_nodes = 0
         total_num_valid_nodes = 0
+        total_num_inner_nodes = 0
 
         for borders_id in range(len(borders)):
             b0 = borders[borders_id]
@@ -419,5 +422,20 @@ class SilhouetteSurfaceNodeEvaluator(SilhouetteEvaluator):
                             self.degree_bag[i] += 1
                             break
 
+        def find_node(i_node):
+            for border in borders:
+                for edge_ref in border:
+                    edge = edges[edge_ref]
+                    if i_node == edge[0]:
+                        return True
+                    if i_node == edge[1]:
+                        return True
+            return False
+
+        for i_node in range(len(nodes)):
+            if not find_node(i_node):
+                total_num_inner_nodes += 1
+
         self.num_nodes = total_num_nodes
         self.num_valid_nodes = total_num_valid_nodes
+        self.num_inner_nodes = total_num_inner_nodes
