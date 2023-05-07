@@ -381,6 +381,11 @@ class SilhouetteSurfaceNodeEvaluator(SilhouetteEvaluator):
         self.reset()
         nodes, edges, polygons = get_graph_repr(puzzle)
         borders = get_border(nodes, edges, polygons)
+        for border in borders:
+            # 明らかにおかしいborderがある場合は後段の評価処理は無意味なので
+            # 事前にraiseしておく
+            if len(border) == 1:
+                raise ValueError("get_border Failed")
         number_of_borders = len(borders)
         self.num_borders = number_of_borders
         # print('number of borders:', number_of_borders)

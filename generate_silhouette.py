@@ -4,12 +4,24 @@
 Usage:
     program <input_json> <output_dir> [-n <n>]
         [--no_image]
+        [--bbox_size <bbox_size>]
+        [--image_size <image_size>]
+        [--algorithm <algorithm>]
 
 Options:
     <input_json>   json file of silhouette puzzle
     <output_dir>   output directory. create if not exist.
-    -n <n>   number of silhouette you want to generate
+    -n <n>   number of silhouette you want to generate [default: 10].
     --no_image   do not create image
+    --bbox_size <bbox_size>  bounding box size (length unit: same as json file) [default: 12].
+    --image_size <image_size>  image size (length unit: px) [default: 400].
+    --algorithm <algorithm>  generation algorithm (see below) [default: random_growth].
+
+Available Algorithms:
+    random_growth   randomly connect pieces around pre-existing pieces
+    alg_A1_20230426  currently under development
+    alg_A2_20230426  currently under development
+    alg_A3_20230428  currently under development
 
 """
 
@@ -17,7 +29,6 @@ import cairosvg
 import docopt
 import functools
 import json
-import matplotlib.pyplot
 import math
 import numpy as np
 import pathlib
@@ -205,7 +216,10 @@ class Puzzle:
     @profiler.method_timer
     def draw(self, svgfile, *,
              bbox=None, shadow=False,
-             also_save_as_png=False):
+             also_save_as_png=False,
+             image_width=400,
+             image_height=400,
+             ):
         """SVGに出力する."""
         if shadow:
             # draw as black face
@@ -223,16 +237,18 @@ class Puzzle:
                 fill_opacity=0.5,
                 )
 
-        width, height = 400, 400
-        dwg = svgwrite.Drawing(svgfile, viewBox=f'0 0 {width} {height}')
+        dwg = svgwrite.Drawing(
+            svgfile,
+            viewBox=f'0 0 {image_width} {image_height}',
+            )
         dwg.add(dwg.rect(insert=(0, 0), size=('100%', '100%'),
                          rx=None, ry=None, fill='rgb(255,255,255)'))
         xmin, xmax, ymin, ymax = bbox
 
         for polygon in self.polygons:
             xs, ys = polygon.xys.T
-            xs_in_svg_coord = (xs - xmin) / (xmax - xmin) * width
-            ys_in_svg_coord = (ymax - ys) / (ymax - ymin) * height
+            xs_in_svg_coord = (xs - xmin) / (xmax - xmin) * image_width
+            ys_in_svg_coord = (ymax - ys) / (ymax - ymin) * image_height
             xys_in_svg_coord = np.vstack([
                 xs_in_svg_coord, ys_in_svg_coord]).T
             dwg.add(svgwrite.shapes.Polygon(
@@ -260,7 +276,8 @@ class Puzzle:
 
     @profiler.method_timer
     def bbox_adjust_all(self, xsize, ysize):
-        """paddingを足してbounding boxを既定のサイズにする.
+        """bounding boxのサイズが指定したサイズ(xsize, ysize)になるように
+        paddingを足したbounding boxを求める
         """
         bbox = self.get_boundingbox()
         xmin, xmax, ymin, ymax = bbox
@@ -448,9 +465,12 @@ class PuzzleGenerator:
             self,
             seed_puzzle,
             new_puzzle_name,
-            xsize, ysize, puzzleoutdir, ax,
+            puzzleoutdir,
             create_image,
+            bbox_size,
+            image_size,
             ):
+
         # 生成！
         if self.alg == "random_growth":
             new_puzzle = self.alg_random_growth(
@@ -474,7 +494,7 @@ class PuzzleGenerator:
             raise ValueError("Unknown algorithm")
 
         # チェック
-        bbox = new_puzzle.bbox_adjust_all(xsize, ysize)
+        bbox = new_puzzle.bbox_adjust_all(bbox_size, bbox_size)
         has_overwrap = new_puzzle.has_overwrap_roughcheck2(bbox)
         new_puzzle.has_overwrap = has_overwrap
         if (has_overwrap is True):
@@ -482,23 +502,32 @@ class PuzzleGenerator:
 
         # OK -> 見た目にばらつきが出るように、回転しておく
         new_puzzle = new_puzzle.rotate_random_all()
-        bbox = new_puzzle.bbox_adjust_all(xsize, ysize)
+        bbox = new_puzzle.bbox_adjust_all(bbox_size, bbox_size)
 
         # 各種、保存処理
         if not create_image:
             return new_puzzle
         imagedir = puzzleoutdir / 'planar'
 
+        draw_option_common = dict(
+            bbox=bbox,
+            also_save_as_png=True,
+            image_width=image_size,
+            image_height=image_size,
+            )
         svgfile = imagedir / f'{new_puzzle_name}.svg'
         new_puzzle.draw(
-            svgfile, shadow=True, bbox=bbox,
-            also_save_as_png=True)
+            svgfile,
+            shadow=True,
+            **draw_option_common,
+            )
 
         svgfile_answer = imagedir / f'{new_puzzle_name}_ans.svg'
         new_puzzle.draw(
             svgfile_answer,
-            shadow=False, bbox=bbox,
-            also_save_as_png=True)
+            shadow=False,
+            **draw_option_common,
+            )
         return new_puzzle
 
     @profiler.method_timer
@@ -669,7 +698,7 @@ class PuzzleGenerator:
                 # step 5. evaluate (difficulty-based)
                 try:
                     evaluator.eval(tmp_puzzle)
-                except Exception as err:
+                except Exception:
                     # とりあえず例外catchで対策
                     continue
 
@@ -768,8 +797,8 @@ class PuzzleGenerator:
                     evaluator.eval(tmp_puzzle)
                 except Exception as err:
                     # とりあえず例外catchで対策
-                    print(err)
                     traceback.print_exc()
+                    print(err, "(evaluation sometimes fails) skipping")
                     continue
 
                 score = 0.0
@@ -805,24 +834,27 @@ class PuzzleGenerator:
 
 def generate_silhouettes(
         jsonfile, outdir, *,
+        algorithm="alg_A3_20230428",  # パズル生成アルゴリズム
         num_generation=10,
         create_image=True,
+        bbox_size=12,  # 画像に収める領域のサイズ(入力するJSONの座標系の単位)
+        image_size=400,  # 出力する画像(またはSVG)のサイズ(px)
         ):
-    # jsondata = load_polys(jsonfile)
+    """.
+    現状では、アルゴリズムは試行錯誤中
+    available algorithm:
+        random_growth
+        alg_A1_20230426
+        alg_A2_20230426
+        alg_A3_20230428
+    """
+
     multiple_puzzle = MultiplePuzzle.from_json(jsonfile)
 
     outdir.resolve().mkdir(exist_ok=True, parents=True)
-    ax = matplotlib.pyplot.figure(figsize=(8, 8)).add_subplot()
-
-    # [FIXME] this value should be changed when the size of puzzle is changed
-    xsize = 12
-    ysize = 12
 
     puzzle_generator = PuzzleGenerator(
-        # algorithm="random_growth",
-        # algorithm="alg_A1_20230426",
-        # algorithm="alg_A2_20230426",
-        algorithm="alg_A3_20230428",
+        algorithm=algorithm
         )
 
     for puzzle in multiple_puzzle:
@@ -837,9 +869,12 @@ def generate_silhouettes(
         MultiplePuzzle(puzzles=[puzzle]).to_json(
             puzzleoutdir / f'{puzzle.name}_in.json')
         svgfile = puzzleoutdir / f'{puzzle.name}.svg'
-        bbox = puzzle.bbox_adjust_all(xsize, ysize)
+        bbox = puzzle.bbox_adjust_all(bbox_size, bbox_size)
         puzzle.draw(svgfile, shadow=False, bbox=bbox,
-                    also_save_as_png=True)
+                    also_save_as_png=True,
+                    image_width=image_size,
+                    image_height=image_size,
+                    )
 
         multiple_puzzle_from_current_seed = MultiplePuzzle([])
 
@@ -847,8 +882,10 @@ def generate_silhouettes(
             new_puzzle = puzzle_generator.generate(
                 puzzle,
                 f'{puzzle.name}-{i}',
-                xsize, ysize, puzzleoutdir, ax,
-                create_image,
+                puzzleoutdir,
+                create_image=create_image,
+                bbox_size=bbox_size,
+                image_size=image_size,
                 )
             if new_puzzle is None:
                 continue
@@ -869,16 +906,22 @@ def main():
     args = docopt.docopt(__doc__)
     jsonfile = pathlib.Path(args.get('<input_json>') or 'input.json')
     outdir = pathlib.Path(args.get('<output_dir>') or 'result')
-    num_generation = int(args.get('-n') or 10)
-    genoptions = dict(
+
+    generate_options = dict(
+        num_generation=int(args.get('-n') or 10),
         create_image=(not (args.get('--no_image') or False)),
+        algorithm=args.get('--algorithm'),
+        bbox_size=float(args.get('--bbox_size')),
+        image_size=int(args.get('--image_size')),
         )
+
+    {print(f"{k}:\t{v}") for k, v in generate_options.items()}
 
     # run generation of puzzles
     generate_silhouettes(
-        jsonfile, outdir,
-        num_generation=num_generation,
-        **genoptions
+        jsonfile,
+        outdir,
+        **generate_options
         )
 
     # profiler.report()
